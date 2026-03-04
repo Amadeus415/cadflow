@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -55,17 +56,31 @@ def _apply_revolve(result: cq.Workplane, op: RevolveOp) -> cq.Workplane:
 
 
 def _apply_fillet(result: cq.Workplane, op: FilletOp) -> cq.Workplane:
-    try:
-        return result.edges(op.edge_selector).fillet(op.radius)
-    except Exception:
-        return result.edges().fillet(op.radius)
+    # Try with requested selector and radius, then halved radius, then skip.
+    for radius in (op.radius, op.radius / 2):
+        try:
+            return result.edges(op.edge_selector).fillet(radius)
+        except Exception:
+            pass
+    warnings.warn(
+        f"Fillet (r={op.radius}, sel={op.edge_selector!r}) could not be applied; skipping.",
+        stacklevel=2,
+    )
+    return result
 
 
 def _apply_chamfer(result: cq.Workplane, op: ChamferOp) -> cq.Workplane:
-    try:
-        return result.edges(op.edge_selector).chamfer(op.length)
-    except Exception:
-        return result.edges().chamfer(op.length)
+    # Try with requested selector and length, then halved length, then skip.
+    for length in (op.length, op.length / 2):
+        try:
+            return result.edges(op.edge_selector).chamfer(length)
+        except Exception:
+            pass
+    warnings.warn(
+        f"Chamfer (l={op.length}, sel={op.edge_selector!r}) could not be applied; skipping.",
+        stacklevel=2,
+    )
+    return result
 
 
 def _apply_cut_extrude(result: cq.Workplane, op: CutExtrudeOp) -> cq.Workplane:
@@ -97,6 +112,10 @@ _APPLICATORS = {
 }
 
 
+# Operations that are cosmetic and can be safely skipped on failure.
+_SKIPPABLE_OPS = {"fillet", "chamfer"}
+
+
 def build_geometry(model: CADModel) -> cq.Workplane:
     """Build CadQuery geometry from a CADModel."""
     result = cq.Workplane("XY")
@@ -104,7 +123,16 @@ def build_geometry(model: CADModel) -> cq.Workplane:
         applicator = _APPLICATORS.get(op.op)
         if applicator is None:
             raise ValueError(f"Operation #{i} has unknown type: {op.op}")
-        result = applicator(result, op)
+        try:
+            result = applicator(result, op)
+        except Exception as exc:
+            if op.op in _SKIPPABLE_OPS:
+                warnings.warn(
+                    f"Operation #{i} ({op.op}) failed and was skipped: {exc}",
+                    stacklevel=2,
+                )
+            else:
+                raise
     return result
 
 
