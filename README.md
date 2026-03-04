@@ -25,6 +25,9 @@ export GEMINI_API_KEY=...
 cad-cli run photo.png
 ```
 
+Gemini integration uses the current `google-genai` Python SDK.
+Reference docs: https://ai.google.dev/gemini-api/docs
+
 ## Commands
 
 ```
@@ -40,7 +43,7 @@ cad-cli schema                   # Print JSON schema for agents
 
 ## Key Options
 
-- `--model` / `-m` — Override Gemini model (default: `gemini-3-flash`)
+- `--model` / `-m` — Override Gemini model (default: `gemini-3-flash-preview`)
 - `--hint` / `-h` — Context hint for the VLM (e.g. "this is a mounting bracket")
 - `--formats` / `-f` — Export formats, comma-separated (default: `step,stl`)
 - `--json` / `-j` — Output JSON for agent consumption

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 from pathlib import Path
 from typing import Optional
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from .schemas import CADModel
 
-DEFAULT_MODEL = "gemini-3-flash"
+DEFAULT_MODEL = "gemini-3-flash-preview"
+MAX_GENERATION_RETRIES = 3
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -27,6 +28,7 @@ Rules:
 2. Estimate real-world dimensions from visual cues (e.g., a USB connector is ~12mm wide).
 3. Build the object bottom-up: start with the main body, then add features (holes, fillets, etc.).
 4. Output ONLY valid JSON matching the schema below. No markdown, no commentary.
+5. Keep the operation list concise; avoid overly fine repetitive detail unless essential.
 
 JSON Schema:
 {schema}
@@ -60,8 +62,8 @@ Respond with the complete modified JSON object.
 # ---------------------------------------------------------------------------
 
 
-def _encode_image(image_path: Path) -> tuple[str, str]:
-    """Return (base64_data, media_type) for an image file."""
+def _read_image_bytes(image_path: Path) -> tuple[bytes, str]:
+    """Return (image_bytes, media_type) for an image file."""
     suffix = image_path.suffix.lower()
     media_map = {
         ".png": "image/png",
@@ -72,8 +74,7 @@ def _encode_image(image_path: Path) -> tuple[str, str]:
         ".bmp": "image/bmp",
     }
     media_type = media_map.get(suffix, "image/png")
-    data = base64.b64encode(image_path.read_bytes()).decode()
-    return data, media_type
+    return image_path.read_bytes(), media_type
 
 
 def _strip_fences(text: str) -> str:
@@ -85,20 +86,86 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _gemini_model(model: Optional[str] = None) -> genai.GenerativeModel:
-    """Configure the Gemini SDK and return a GenerativeModel."""
+def _gemini_client() -> genai.Client:
+    """Build and return a Gemini API client."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY env var is required.")
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(
-        model_name=model or DEFAULT_MODEL,
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.2,
-            max_output_tokens=4096,
-            response_mime_type="application/json",
-        ),
+    return genai.Client(api_key=api_key)
+
+
+def _generation_config(system_instruction: str) -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        temperature=0.0,
+        max_output_tokens=8192,
+        response_mime_type="application/json",
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        system_instruction=system_instruction,
     )
+
+
+def _response_debug_info(resp: types.GenerateContentResponse) -> str:
+    finish_reason = None
+    if resp.candidates:
+        finish_reason = resp.candidates[0].finish_reason
+    usage = resp.usage_metadata
+    total_tokens = usage.total_token_count if usage else None
+    thoughts_tokens = usage.thoughts_token_count if usage else None
+    return (
+        f"finish_reason={finish_reason}, "
+        f"total_tokens={total_tokens}, thoughts_tokens={thoughts_tokens}"
+    )
+
+
+def _parse_cad_model_response(resp: types.GenerateContentResponse) -> CADModel:
+    """Parse Gemini response into CADModel, preferring structured parsed output."""
+    if resp.parsed is not None:
+        return CADModel.model_validate(resp.parsed)
+
+    if not resp.text:
+        raise ValueError(f"Gemini returned an empty response. {_response_debug_info(resp)}")
+
+    text = _strip_fences(resp.text)
+    try:
+        return CADModel.model_validate(json.loads(text))
+    except json.JSONDecodeError as e:
+        snippet = text[:500].replace("\n", "\\n")
+        raise ValueError(
+            "Gemini returned invalid JSON: "
+            f"{e}. {_response_debug_info(resp)}. "
+            f"Response length={len(text)}. Response snippet: {snippet}"
+        ) from e
+
+
+def _generate_cad_model(
+    client: genai.Client,
+    model_name: str,
+    contents: list[object],
+    system_instruction: str,
+) -> CADModel:
+    last_error: Optional[ValueError] = None
+
+    for attempt in range(1, MAX_GENERATION_RETRIES + 1):
+        attempt_contents = contents
+        if attempt > 1:
+            attempt_contents = [
+                "IMPORTANT: Return exactly one complete JSON object. No markdown, no truncation.",
+                *contents,
+            ]
+
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=attempt_contents,
+            config=_generation_config(system_instruction),
+        )
+        try:
+            return _parse_cad_model_response(resp)
+        except ValueError as e:
+            last_error = e
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Gemini generation failed without an explicit parse error.")
 
 
 # ---------------------------------------------------------------------------
@@ -113,18 +180,22 @@ def analyze_image(
     **_kwargs,
 ) -> CADModel:
     """Analyze an image and return a validated CADModel."""
-    b64, media = _encode_image(image_path)
+    image_bytes, media = _read_image_bytes(image_path)
     schema_text = json.dumps(CADModel.model_json_schema(), indent=2)
     system = ANALYZE_PROMPT.format(schema=schema_text)
 
-    parts: list = [system]
+    parts: list[object] = []
     if hint:
         parts.append(hint)
-    parts.append({"inline_data": {"mime_type": media, "data": b64}})
+    parts.append(types.Part.from_bytes(data=image_bytes, mime_type=media))
 
-    gm = _gemini_model(model)
-    resp = gm.generate_content(parts)
-    return CADModel.model_validate(json.loads(_strip_fences(resp.text)))
+    client = _gemini_client()
+    return _generate_cad_model(
+        client=client,
+        model_name=model or DEFAULT_MODEL,
+        contents=parts,
+        system_instruction=system,
+    )
 
 
 def iterate_model(
@@ -140,6 +211,10 @@ def iterate_model(
         schema=schema_text,
     )
 
-    gm = _gemini_model(model)
-    resp = gm.generate_content([system, instruction])
-    return CADModel.model_validate(json.loads(_strip_fences(resp.text)))
+    client = _gemini_client()
+    return _generate_cad_model(
+        client=client,
+        model_name=model or DEFAULT_MODEL,
+        contents=[instruction],
+        system_instruction=system,
+    )
