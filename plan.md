@@ -1,6 +1,6 @@
 # Image → VLM-described geometry → CadQuery parametric model, skip noisy mesh entirely
 
-## Stage 1: Send image to a VLM (GPT-4o / Claude) with a structured prompt: "Describe this object as primitive CAD operations (extrude, revolve, fillet, etc.) with dimensions"
+## Stage 1: Send image to a VLM with a structured prompt: "Describe this object as primitive CAD operations (extrude, revolve, fillet, etc.) with dimensions"
 
 ## Stage 2: VLM output → validated JSON schema of CAD operations
 
