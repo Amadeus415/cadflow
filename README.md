@@ -7,7 +7,7 @@ Turn a photo of a physical object into a manufacturable STEP/STL file through a 
 ## How It Works
 
 ```
-Image → VLM (GPT-4o / Claude) → Structured JSON → CadQuery → STEP / STL
+Image → VLM (Gemini) → Structured JSON → CadQuery → STEP / STL
 ```
 
 1. **Analyze** — Send image to a VLM with a structured prompt describing CAD primitives
@@ -21,7 +21,7 @@ Every run is tracked in `runs/` with a manifest, input image, intermediate JSON,
 
 ```bash
 pip install -e .
-export OPENAI_API_KEY=sk-...       # or ANTHROPIC_API_KEY
+export GEMINI_API_KEY=...
 cad-cli run photo.png
 ```
 
@@ -40,8 +40,7 @@ cad-cli schema                   # Print JSON schema for agents
 
 ## Key Options
 
-- `--provider` / `-p` — `openai` or `anthropic`
-- `--model` / `-m` — Override model (e.g. `gpt-4o`, `claude-sonnet-4-20250514`)
+- `--model` / `-m` — Override Gemini model (default: `gemini-3-flash`)
 - `--hint` / `-h` — Context hint for the VLM (e.g. "this is a mounting bracket")
 - `--formats` / `-f` — Export formats, comma-separated (default: `step,stl`)
 - `--json` / `-j` — Output JSON for agent consumption
@@ -55,10 +54,8 @@ Every command supports `--json` for structured output. The `schema` command prin
 
 ```
 src/cad_cli/
-├── cli.py          # Typer CLI entry point
-├── vlm.py          # Image → structured CAD JSON
-├── vlm_iterate.py  # Iterate on existing models via VLM
-├── schemas.py      # Pydantic models for CAD operations
-├── cad.py          # JSON → CadQuery → STEP/STL
-└── pipeline.py     # Run orchestration & artifact tracking
+├── cli.py       # Typer CLI entry point + run orchestration
+├── vlm.py       # Gemini API: image analysis + model iteration
+├── schemas.py   # Pydantic models for CAD operations
+└── cad.py       # JSON → CadQuery → STEP/STL
 ```

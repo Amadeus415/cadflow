@@ -1,4 +1,4 @@
-"""VLM integration: send an image and get structured CAD operations back."""
+"""VLM integration: Gemini-powered image analysis and model iteration."""
 
 from __future__ import annotations
 
@@ -8,15 +8,17 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from pydantic import ValidationError
+import google.generativeai as genai
 
 from .schemas import CADModel
 
+DEFAULT_MODEL = "gemini-3-flash"
+
 # ---------------------------------------------------------------------------
-# System prompt for VLM
+# Prompts
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
+ANALYZE_PROMPT = """\
 You are a CAD engineering assistant. Given an image of a physical object or part, \
 describe it as a sequence of parametric CAD operations that would reproduce the geometry.
 
@@ -32,8 +34,29 @@ JSON Schema:
 Respond with a single JSON object. Do not wrap it in code fences.
 """
 
+ITERATE_PROMPT = """\
+You are a CAD engineering assistant. You are given an existing CAD model as JSON \
+and a modification instruction from the user.
+
+Your job is to return a MODIFIED version of the CAD model JSON that applies the \
+requested change. Preserve all existing operations that are not affected by the change.
+
+Rules:
+1. Keep the same JSON schema structure.
+2. Only modify what the instruction asks for.
+3. Output ONLY valid JSON. No markdown, no commentary.
+
+Current CAD model:
+{current_model}
+
+JSON Schema:
+{schema}
+
+Respond with the complete modified JSON object.
+"""
+
 # ---------------------------------------------------------------------------
-# Image encoding helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -53,89 +76,29 @@ def _encode_image(image_path: Path) -> tuple[str, str]:
     return data, media_type
 
 
-# ---------------------------------------------------------------------------
-# Provider implementations
-# ---------------------------------------------------------------------------
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1]
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
 
 
-def _call_openai(
-    image_path: Path,
-    user_hint: str,
-    model: str = "gpt-4o",
-) -> dict:
-    """Call OpenAI's vision model."""
-    from openai import OpenAI
-
-    client = OpenAI()  # uses OPENAI_API_KEY env var
-    b64, media = _encode_image(image_path)
-
-    schema_text = json.dumps(CADModel.model_json_schema(), indent=2)
-    system = SYSTEM_PROMPT.format(schema=schema_text)
-
-    user_content: list[dict] = [
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:{media};base64,{b64}", "detail": "high"},
-        },
-    ]
-    if user_hint:
-        user_content.insert(0, {"type": "text", "text": user_hint})
-
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.2,
-        max_tokens=4096,
+def _gemini_model(model: Optional[str] = None) -> genai.GenerativeModel:
+    """Configure the Gemini SDK and return a GenerativeModel."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY env var is required.")
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel(
+        model_name=model or DEFAULT_MODEL,
+        generation_config=genai.types.GenerationConfig(
+            temperature=0.2,
+            max_output_tokens=4096,
+            response_mime_type="application/json",
+        ),
     )
-    raw = resp.choices[0].message.content.strip()
-    # Strip markdown code fences if the model wraps anyway
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-    if raw.endswith("```"):
-        raw = raw.rsplit("```", 1)[0]
-    return json.loads(raw)
-
-
-def _call_anthropic(
-    image_path: Path,
-    user_hint: str,
-    model: str = "claude-sonnet-4-20250514",
-) -> dict:
-    """Call Anthropic's vision model."""
-    from anthropic import Anthropic
-
-    client = Anthropic()  # uses ANTHROPIC_API_KEY env var
-    b64, media = _encode_image(image_path)
-
-    schema_text = json.dumps(CADModel.model_json_schema(), indent=2)
-    system = SYSTEM_PROMPT.format(schema=schema_text)
-
-    user_content: list[dict] = []
-    if user_hint:
-        user_content.append({"type": "text", "text": user_hint})
-    user_content.append(
-        {
-            "type": "image",
-            "source": {"type": "base64", "media_type": media, "data": b64},
-        }
-    )
-
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=system,
-        messages=[{"role": "user", "content": user_content}],
-        temperature=0.2,
-    )
-    raw = resp.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1]
-    if raw.endswith("```"):
-        raw = raw.rsplit("```", 1)[0]
-    return json.loads(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -145,38 +108,38 @@ def _call_anthropic(
 
 def analyze_image(
     image_path: Path,
-    provider: Optional[str] = None,
     model: Optional[str] = None,
     hint: str = "",
+    **_kwargs,
 ) -> CADModel:
-    """Analyze an image and return a validated CADModel.
+    """Analyze an image and return a validated CADModel."""
+    b64, media = _encode_image(image_path)
+    schema_text = json.dumps(CADModel.model_json_schema(), indent=2)
+    system = ANALYZE_PROMPT.format(schema=schema_text)
 
-    Args:
-        image_path: Path to the input image.
-        provider: "openai" or "anthropic". Falls back to CAD_CLI_VLM_PROVIDER env var.
-        model: Override the default model name.
-        hint: Optional text hint for the VLM (e.g. "this is a mounting bracket").
+    parts: list = [system]
+    if hint:
+        parts.append(hint)
+    parts.append({"inline_data": {"mime_type": media, "data": b64}})
 
-    Returns:
-        Validated CADModel instance.
+    gm = _gemini_model(model)
+    resp = gm.generate_content(parts)
+    return CADModel.model_validate(json.loads(_strip_fences(resp.text)))
 
-    Raises:
-        ValidationError: If VLM output doesn't match schema.
-        ValueError: If provider is unknown or API key missing.
-    """
-    provider = provider or os.getenv("CAD_CLI_VLM_PROVIDER", "openai")
 
-    if provider == "openai":
-        kwargs = {"image_path": image_path, "user_hint": hint}
-        if model:
-            kwargs["model"] = model
-        raw = _call_openai(**kwargs)
-    elif provider == "anthropic":
-        kwargs = {"image_path": image_path, "user_hint": hint}
-        if model:
-            kwargs["model"] = model
-        raw = _call_anthropic(**kwargs)
-    else:
-        raise ValueError(f"Unknown VLM provider: {provider!r}. Use 'openai' or 'anthropic'.")
+def iterate_model(
+    current_model: CADModel,
+    instruction: str,
+    model: Optional[str] = None,
+    **_kwargs,
+) -> CADModel:
+    """Send the current model + instruction to Gemini, get back a modified CADModel."""
+    schema_text = json.dumps(CADModel.model_json_schema(), indent=2)
+    system = ITERATE_PROMPT.format(
+        current_model=current_model.model_dump_json(indent=2),
+        schema=schema_text,
+    )
 
-    return CADModel.model_validate(raw)
+    gm = _gemini_model(model)
+    resp = gm.generate_content([system, instruction])
+    return CADModel.model_validate(json.loads(_strip_fences(resp.text)))
