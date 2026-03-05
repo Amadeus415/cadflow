@@ -1,4 +1,4 @@
-"""VLM integration: Gemini-powered image analysis and model iteration."""
+"""AI integration: Gemini-powered image analysis and model iteration."""
 
 from __future__ import annotations
 

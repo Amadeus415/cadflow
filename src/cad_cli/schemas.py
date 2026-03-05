@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union, Annotated
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Discriminator, Field, Tag
+from pydantic import BaseModel, Discriminator, Field, Tag, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -16,16 +16,32 @@ class Point2D(BaseModel):
     y: float
 
 
+Point3D = tuple[float, float, float]
+PlaneName = Literal["XY", "YZ", "XZ"]
+AxisName = Literal["X", "Y", "Z"]
+
+
+def _coerce_center_to_origin(data: Any) -> Any:
+    """Backward-compatibility adapter for historical `center` field."""
+    if not isinstance(data, dict):
+        return data
+    if "origin" not in data and "center" in data:
+        center = data["center"]
+        if isinstance(center, (list, tuple)) and len(center) == 3:
+            data = {**data, "origin": center}
+    return data
+
+
 class RectangleSketch(BaseModel):
     type: Literal["rectangle"] = "rectangle"
-    width: float = Field(..., description="Width in mm")
-    height: float = Field(..., description="Height in mm")
+    width: float = Field(..., gt=0, description="Width in mm")
+    height: float = Field(..., gt=0, description="Height in mm")
     center: Point2D = Field(default_factory=lambda: Point2D(x=0, y=0))
 
 
 class CircleSketch(BaseModel):
     type: Literal["circle"] = "circle"
-    radius: float = Field(..., description="Radius in mm")
+    radius: float = Field(..., gt=0, description="Radius in mm")
     center: Point2D = Field(default_factory=lambda: Point2D(x=0, y=0))
 
 
@@ -51,15 +67,21 @@ SketchPrimitive = Annotated[
 class ExtrudeOp(BaseModel):
     op: Literal["extrude"] = "extrude"
     sketch: SketchPrimitive
-    depth: float = Field(..., description="Extrusion depth in mm")
-    center: Optional[list[float]] = Field(None, description="[x, y, z] placement offset")
+    depth: float = Field(..., gt=0, description="Extrusion depth in mm")
+    plane: PlaneName = Field("XY", description="Sketch plane in world coordinates")
+    origin: Point3D = Field((0.0, 0.0, 0.0), description="[x, y, z] origin in mm")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_center(cls, data: Any) -> Any:
+        return _coerce_center_to_origin(data)
 
 
 class RevolveOp(BaseModel):
     op: Literal["revolve"] = "revolve"
     sketch: SketchPrimitive
     angle: float = Field(360.0, description="Rotation angle in degrees")
-    axis: str = Field("Z", description="Axis of revolution: X, Y, or Z")
+    axis: AxisName = Field("Z", description="Axis of revolution")
 
 
 class FilletOp(BaseModel):
@@ -77,15 +99,27 @@ class ChamferOp(BaseModel):
 class CutExtrudeOp(BaseModel):
     op: Literal["cut_extrude"] = "cut_extrude"
     sketch: SketchPrimitive
-    depth: float = Field(..., description="Cut depth in mm")
-    center: Optional[list[float]] = Field(None, description="[x, y, z] placement offset")
+    depth: float = Field(..., gt=0, description="Cut depth in mm")
+    plane: PlaneName = Field("XY", description="Sketch plane in world coordinates")
+    origin: Point3D = Field((0.0, 0.0, 0.0), description="[x, y, z] origin in mm")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_center(cls, data: Any) -> Any:
+        return _coerce_center_to_origin(data)
 
 
 class CutCylinderOp(BaseModel):
     op: Literal["cut_cylinder"] = "cut_cylinder"
-    radius: float = Field(..., description="Hole radius in mm")
-    depth: float = Field(..., description="Hole depth in mm")
-    center: Optional[list[float]] = Field(None, description="[x, y, z] position of hole center")
+    radius: float = Field(..., gt=0, description="Hole radius in mm")
+    depth: float = Field(..., gt=0, description="Hole depth in mm")
+    axis: AxisName = Field("Z", description="Hole axis direction")
+    origin: Point3D = Field((0.0, 0.0, 0.0), description="[x, y, z] hole origin in mm")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_center(cls, data: Any) -> Any:
+        return _coerce_center_to_origin(data)
 
 
 CADOperation = Annotated[
@@ -110,7 +144,7 @@ class CADModel(BaseModel):
 
     name: str = Field(..., description="Short descriptive name for the object")
     description: str = Field("", description="Human-readable description")
-    unit: str = Field("mm", description="Unit of measurement")
+    unit: Literal["mm"] = Field("mm", description="Unit of measurement")
     operations: list[CADOperation] = Field(
         ...,
         min_length=1,
@@ -126,6 +160,8 @@ class CADModel(BaseModel):
                 "operations": [
                     {
                         "op": "extrude",
+                        "plane": "XY",
+                        "origin": [0, 0, 0],
                         "sketch": {"type": "rectangle", "width": 40, "height": 60},
                         "depth": 5,
                     },
@@ -133,7 +169,8 @@ class CADModel(BaseModel):
                         "op": "cut_cylinder",
                         "radius": 3,
                         "depth": 5,
-                        "center": [10, 15, 5],
+                        "axis": "Z",
+                        "origin": [10, 15, 0],
                     },
                 ],
             }

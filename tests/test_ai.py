@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from cad_cli.vlm import (
+from cad_cli.ai import (
     INITIAL_MAX_OUTPUT_TOKENS,
     INITIAL_THINKING_BUDGET,
     RETRY_MAX_OUTPUT_TOKENS,
@@ -47,7 +47,7 @@ class _FakeClient:
         self.models = _FakeModels(responses)
 
 
-class VLMConfigTests(unittest.TestCase):
+class AIConfigTests(unittest.TestCase):
     def test_generation_config_first_attempt_prioritizes_balanced_reasoning(self) -> None:
         cfg = _generation_config("system prompt", attempt=1)
         self.assertEqual(cfg.max_output_tokens, INITIAL_MAX_OUTPUT_TOKENS)

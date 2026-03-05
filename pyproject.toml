@@ -26,4 +26,4 @@ cad-cli = "cad_cli.cli:app"
 packages = ["src/cad_cli"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/cad_cli"]
+include = ["src/cad_cli", "tests", "README.md", "pyproject.toml"]
